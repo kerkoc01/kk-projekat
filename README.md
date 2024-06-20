@@ -22,4 +22,4 @@ To compile and run your code with this optimization:
 	```bash
 	./bin/clang -S -emit-llvm your-c-file-name.c
 	./bin/opt -load lib/MyLICMPass.so -enable-new-pm=0 -my-licm your-c-file-name.ll
-3. The optimized code will be available in 'your-c-file-name.ll'.
+3. The optimized code will be available in `your-c-file-name.ll`.
