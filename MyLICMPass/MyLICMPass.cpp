@@ -29,6 +29,8 @@ namespace {
             errs() << "Processing function: " << F.getName() << "\n";
 
             for (Loop *L : LI) {
+                errs() << "Loop Preheader: " << *L->getLoopPreheader()->getTerminator() << "\n";
+                std::vector<Instruction*> instructionsToMove;
                 for (BasicBlock *BB : L->blocks()) {
                     for (Instruction &I : *BB) {
                         errs() << "Instruction: " << I << "\n";
@@ -36,12 +38,33 @@ namespace {
                         errs() << "areAllOperandsConstantsOrComputedOutsideLoop: " << areAllOperandsConstantsOrComputedOutsideLoop(&I, L) << "\n";
                         errs() << "isSafeToSpeculativelyExecute: " << isSafeToSpeculativelyExecute(&I) << "\n";
                         errs() << "doesBlockDominateAllExitBlocks: " << doesBlockDominateAllExitBlocks(BB, L, &DT) << "\n";
-                        if (isDesiredInstructionType(&I) && areAllOperandsConstantsOrComputedOutsideLoop(&I, L) &&
-                        isSafeToSpeculativelyExecute(&I) && doesBlockDominateAllExitBlocks(BB, L, &DT)) {
-                            I.moveBefore(L->getLoopPreheader()->getTerminator());
+                        if (isDesiredInstructionType(&I) &&
+                            areAllOperandsConstantsOrComputedOutsideLoop(&I, L) &&
+                            isSafeToSpeculativelyExecute(&I) &&
+                            doesBlockDominateAllExitBlocks(BB, L, &DT)) {
                             Changed = true;
                         }
+                        else if (auto *SI = dyn_cast<StoreInst>(&I)) {
+                            errs() << "Store Instruction!\n";
+                            if(!isChangedAfterInstruction(SI, SI->getPointerOperand(), L)) {
+                                Value *StoredVal = SI->getValueOperand();
+                                if (isa<Constant>(StoredVal)) {
+                                    errs() << "Moving!\n";
+                                    instructionsToMove.push_back(&I);
+                                    Changed = true;
+                                } else if (isDefinedOutsideLoop(StoredVal, L)) {
+                                    //TODO:Izbrisati load i store i zameniti SI u petlji sa promenljivom koja se storeuje u SI
+                                    Changed = true;
+                                }
+                            }
+                        }
+                        errs() << "\n\n\n";
                     }
+                }
+                for(Instruction* I : instructionsToMove) {
+                    errs() << "Instruction to move: " << *I << "\n";
+                    errs() << "Where to move it: " << *L->getLoopPreheader()->getTerminator() << "\n";
+                    I->moveBefore(L->getLoopPreheader()->getTerminator());
                 }
             }
 
@@ -72,11 +95,9 @@ namespace {
                 if (!isa<Constant>(V)) {
                     if (Instruction *OpInst = dyn_cast<Instruction>(V)) {
                         if (L->contains(OpInst->getParent())) {
-                            // Operand is computed inside the loop
                             return false;
                         }
                     } else {
-                        // Operand is neither a constant nor an instruction
                         return false;
                     }
                 }
@@ -104,6 +125,34 @@ namespace {
                 }
             }
             return true;
+        }
+
+        bool isDefinedOutsideLoop(Value *V, Loop *L) {
+            if (Instruction *Inst = dyn_cast<Instruction>(V)) {
+                return !L->contains(Inst->getParent());
+            }
+            return true;
+        }
+
+        bool isChangedAfterInstruction(Instruction *StartInst, Value *Ptr, Loop *L) {
+            bool StartFound = false;
+            for (BasicBlock *BB : L->blocks()) {
+                for (Instruction &I : *BB) {
+                    if (&I == StartInst) {
+                        StartFound = true;
+                        continue;
+                    }
+
+                    if (StartFound) {
+                        if (auto *SI = dyn_cast<StoreInst>(&I)) {
+                            if (SI->getPointerOperand() == Ptr) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
         }
 
     };
