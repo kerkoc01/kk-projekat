@@ -29,39 +29,31 @@ namespace {
             errs() << "Processing function: " << F.getName() << "\n";
 
             for (Loop *L : LI) {
+                if (!L->getLoopPreheader()) {
+                    errs() << "No loop preheader, skipping loop.\n";
+                    continue;
+                }
+                
                 errs() << "Loop Preheader: " << *L->getLoopPreheader()->getTerminator() << "\n";
                 std::vector<Instruction*> instructionsToMove;
+
                 for (BasicBlock *BB : L->blocks()) {
                     for (Instruction &I : *BB) {
                         errs() << "Instruction: " << I << "\n";
-                        errs() << "isDesiredInstructionType: " << isDesiredInstructionType(&I)<< "\n";
+                        errs() << "isDesiredInstructionType: " << isDesiredInstructionType(&I) << "\n";
                         errs() << "areAllOperandsConstantsOrComputedOutsideLoop: " << areAllOperandsConstantsOrComputedOutsideLoop(&I, L) << "\n";
                         errs() << "isSafeToSpeculativelyExecute: " << isSafeToSpeculativelyExecute(&I) << "\n";
                         errs() << "doesBlockDominateAllExitBlocks: " << doesBlockDominateAllExitBlocks(BB, L, &DT) << "\n";
-                        if (isDesiredInstructionType(&I) &&
-                            areAllOperandsConstantsOrComputedOutsideLoop(&I, L) &&
-                            isSafeToSpeculativelyExecute(&I) &&
-                            doesBlockDominateAllExitBlocks(BB, L, &DT)) {
+                        
+                        if (isInvariantInstruction(&I, L, BB, DT)) {
+                            instructionsToMove.push_back(&I);
                             Changed = true;
                         }
-                        else if (auto *SI = dyn_cast<StoreInst>(&I)) {
-                            errs() << "Store Instruction!\n";
-                            if(!isChangedAfterInstruction(SI, SI->getPointerOperand(), L)) {
-                                Value *StoredVal = SI->getValueOperand();
-                                if (isa<Constant>(StoredVal)) {
-                                    errs() << "Moving!\n";
-                                    instructionsToMove.push_back(&I);
-                                    Changed = true;
-                                } else if (isDefinedOutsideLoop(StoredVal, L)) {
-                                    //TODO:Izbrisati load i store i zameniti SI u petlji sa promenljivom koja se storeuje u SI
-                                    Changed = true;
-                                }
-                            }
-                        }
-                        errs() << "\n\n\n";
+                        errs() << "\n";
                     }
                 }
-                for(Instruction* I : instructionsToMove) {
+
+                for (Instruction* I : instructionsToMove) {
                     errs() << "Instruction to move: " << *I << "\n";
                     errs() << "Where to move it: " << *L->getLoopPreheader()->getTerminator() << "\n";
                     I->moveBefore(L->getLoopPreheader()->getTerminator());
@@ -69,7 +61,6 @@ namespace {
             }
 
             errs() << Changed << " changed!\n";
-
             return Changed;
         }
 
@@ -79,14 +70,32 @@ namespace {
             AU.setPreservesAll();
         }
 
-        bool isDesiredInstructionType(Instruction *I) {
-            if (isa<BinaryOperator>(I) ||
-                isa<SelectInst>(I) ||
-                isa<CastInst>(I) ||
-                isa<GetElementPtrInst>(I)) {
+        bool isInvariantInstruction(Instruction *I, Loop *L, BasicBlock *BB, DominatorTree &DT) {
+            if (isDesiredInstructionType(I) &&
+                areAllOperandsConstantsOrComputedOutsideLoop(I, L) &&
+                isSafeToSpeculativelyExecute(I) &&
+                doesBlockDominateAllExitBlocks(BB, L, &DT)) {
                 return true;
             }
+
+            if (auto *SI = dyn_cast<StoreInst>(I)) {
+                if (!isChangedAfterInstruction(SI, SI->getPointerOperand(), L)) {
+                    Value *StoredVal = SI->getValueOperand();
+                    if (isa<Constant>(StoredVal) || isDefinedOutsideLoop(StoredVal, L)) {
+                        return true;
+                    }
+                }
+            }
+
             return false;
+        }
+
+        bool isDesiredInstructionType(Instruction *I) {
+            return isa<BinaryOperator>(I) ||
+                   isa<SelectInst>(I) ||
+                   isa<CastInst>(I) ||
+                   isa<GetElementPtrInst>(I) ||
+                   isa<LoadInst>(I);
         }
 
         bool areAllOperandsConstantsOrComputedOutsideLoop(Instruction *I, Loop *L) {
@@ -154,9 +163,9 @@ namespace {
             }
             return false;
         }
-
     };
 }
 
 char MyLICMPass::ID = 0;
 static RegisterPass<MyLICMPass> X("my-licm", "My Loop Invariant Code Motion Pass", false, false);
+
