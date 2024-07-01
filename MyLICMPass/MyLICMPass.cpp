@@ -70,59 +70,58 @@ namespace {
             AU.setPreservesAll();
         }
 
-        bool isInvariantInstruction(Instruction *I, Loop *L, DominatorTree &DT, std::vector < Instruction * > instructionsToMove) {
-            if (isDesiredInstructionType(I) &&
-                areAllOperandsConstantsOrComputedOutsideLoop(I, L) &&
-                isSafeToSpeculativelyExecute(I) &&
-                doesBlockDominateAllExitBlocks(I->getParent(), L, &DT)) {
+        bool isInvariantInstruction(Instruction *I, Loop *L, DominatorTree &DT, std::vector<Instruction *> &instructionsToMove) {
+    if (isDesiredInstructionType(I) &&
+        areAllOperandsConstantsOrComputedOutsideLoop(I, L) &&
+        isSafeToSpeculativelyExecute(I) &&
+        doesBlockDominateAllExitBlocks(I->getParent(), L, &DT)) {
+        instructionsToMove.push_back(I);
+        return true;
+    }
+
+    if (auto *SI = dyn_cast<StoreInst>(I)) {
+        if (!isReferencedInLoop(SI, SI->getPointerOperand(), L)) {
+            Value *StoredVal = SI->getValueOperand();
+            if (isa<Constant>(StoredVal)) {
                 instructionsToMove.push_back(I);
                 return true;
             }
+        }
+    }
 
-            if (auto *SI = dyn_cast<StoreInst>(I)) {
-                if (!isReferencedInLoop(SI, SI->getPointerOperand(), L)) {
-                    Value *StoredVal = SI->getValueOperand();
-                    if (isa<Constant>(StoredVal)) {
-                        instructionsToMove.push_back(I);
-                        return true;
-                    }
-                }
-            }
+    if (isIncrementOrDecrement(I)) {
+        if (auto *SI = dyn_cast<StoreInst>(I->getNextNode())) {
+            Value *storedPointer = SI->getPointerOperand();
+            if (!isReferencedInLoop(SI, storedPointer, L) &&
+                L->getLoopLatch() != I->getParent() &&
+                L->getHeader() != I->getParent()) {
 
-            
-            if (isIncrementOrDecrement(I)) {
-                auto *SI = cast<StoreInst>(I->getNextNode());
-                Value *storedPointer = SI->getPointerOperand();
-                if (!isReferencedInLoop(SI, storedPointer, L) && 
-                    L->getLoopLatch() != I->getParent() && 
-                    L->getHeader() != I->getParent()) {
-
-                    // 1. brisanje load instrukcije
-                    auto *LI = cast<LoadInst>(I->getPrevNode());
+                // 1. Remove the load instruction
+                if (auto *LI = dyn_cast<LoadInst>(I->getPrevNode())) {
                     Value *loadedValue = LI->getPointerOperand();
                     LI->eraseFromParent();
 
-                    // 2. load u promenljivu
+                    // 2. Identify operands
                     Value *VarOperand = nullptr;
                     ConstantInt *ConstOperand = nullptr;
                     if (isa<ConstantInt>(I->getOperand(0))) {
                         ConstOperand = cast<ConstantInt>(I->getOperand(0));
                         VarOperand = I->getOperand(1);
+                        I->setOperand(0, loadedValue);
                     } else {
                         ConstOperand = cast<ConstantInt>(I->getOperand(1));
                         VarOperand = I->getOperand(0);
+                        I->setOperand(1, loadedValue);
                     }
-                    I->setOperand(0, loadedValue);
-                    I->setOperand(1, ConstOperand);
 
-                    // 3. konstanta * iteracije
+                    // 3. Constant * iterations
                     PHINode *IndVar = L->getCanonicalInductionVariable();
                     assert(IndVar && "Loop does not have a canonical induction variable");
                     Value *LoopBound = IndVar->getIncomingValueForBlock(L->getLoopLatch());
                     assert(isa<ConstantInt>(LoopBound) && "Loop bound is not a constant");
                     ConstantInt *Iterations = cast<ConstantInt>(LoopBound);
                     APInt TotalInc = ConstOperand->getValue() * Iterations->getValue();
-                    ConstantInt *NewConst = ConstantInt::get(ConstOperand->getType(), TotalInc);
+                    ConstantInt *NewConst = ConstantInt::get(ConstOperand->getContext(), TotalInc);
 
                     // const = new const
                     I->setOperand(ConstOperand == I->getOperand(0) ? 0 : 1, NewConst);
@@ -135,9 +134,12 @@ namespace {
                     return true;
                 }
             }
-
-            return false;
         }
+    }
+
+    return false;
+}
+
 
         bool isDesiredInstructionType(Instruction *I) {
             return isa<BinaryOperator>(I) ||
