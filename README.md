@@ -21,5 +21,5 @@ To compile and run your code with this optimization:
 2. From the `llvmproject/build/` directory, execute the following commands:
 	```bash
 	./bin/clang -S -emit-llvm your-c-file-name.c
-	./bin/opt -S -load lib/MyLICMPass.so -enable-new-pm=0 -my-licm your-c-file-name.ll -o -output.ll
+	./bin/opt -S -load lib/MyLICMPass.so -enable-new-pm=0 -my-licm your-c-file-name.ll -o output.ll
 3. The optimized code will be available in `output.ll`.

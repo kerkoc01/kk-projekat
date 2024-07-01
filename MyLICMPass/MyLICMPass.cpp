@@ -23,42 +23,42 @@ namespace {
 
         bool runOnFunction(Function &F) override {
             bool Changed = false;
+            bool CurrChanged = false;
             LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
             DominatorTree &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
 
             errs() << "Processing function: " << F.getName() << "\n";
 
-            for (Loop *L : LI) {
-                if (!L->getLoopPreheader()) {
-                    errs() << "No loop preheader, skipping loop.\n";
-                    continue;
-                }
-                
-                errs() << "Loop Preheader: " << *L->getLoopPreheader()->getTerminator() << "\n";
-                std::vector<Instruction*> instructionsToMove;
+            /*TODO: Julijana - uradi ipak constant folding i constant propagation.
+                               Ovo ima vec gotovo, a i na vezbama je radjeno.
+                               Bolje kao na vezbama, jer je gotovo 5 redova koda, al samo ako imas vremena
+                               Uradi da bude u funkciji. Nzm dal su tamo tako.
+                               Menjanjem konstantih promenljivih konstantama pisemo optimizaciju samo za konstante.*/
+            do {
+                for (Loop *L: LI) {
+                    if (!L->getLoopPreheader()) {
+                        errs() << "No loop preheader, skipping loop.\n";
+                        continue;
+                    }
 
-                for (BasicBlock *BB : L->blocks()) {
-                    for (Instruction &I : *BB) {
-                        errs() << "Instruction: " << I << "\n";
-                        errs() << "isDesiredInstructionType: " << isDesiredInstructionType(&I) << "\n";
-                        errs() << "areAllOperandsConstantsOrComputedOutsideLoop: " << areAllOperandsConstantsOrComputedOutsideLoop(&I, L) << "\n";
-                        errs() << "isSafeToSpeculativelyExecute: " << isSafeToSpeculativelyExecute(&I) << "\n";
-                        errs() << "doesBlockDominateAllExitBlocks: " << doesBlockDominateAllExitBlocks(BB, L, &DT) << "\n";
-                        
-                        if (isInvariantInstruction(&I, L, BB, DT)) {
-                            instructionsToMove.push_back(&I);
-                            Changed = true;
+                    std::vector < Instruction * > instructionsToMove;
+
+                    for (BasicBlock *BB: L->blocks()) {
+                        for (Instruction &I: *BB) {
+                            CurrChanged = isInvariantInstruction(&I, L, DT, instructionsToMove);
+                            Changed |= CurrChanged;
                         }
-                        errs() << "\n";
+                    }
+
+                    for (Instruction *I: instructionsToMove) {
+                        errs() << "Instruction to move: " << *I << "\n";
+                        errs() << "Where to move it: " << *L->getLoopPreheader()->getTerminator() << "\n";
+                        I->moveBefore(L->getLoopPreheader()->getTerminator());
                     }
                 }
+            } while(CurrChanged);
 
-                for (Instruction* I : instructionsToMove) {
-                    errs() << "Instruction to move: " << *I << "\n";
-                    errs() << "Where to move it: " << *L->getLoopPreheader()->getTerminator() << "\n";
-                    I->moveBefore(L->getLoopPreheader()->getTerminator());
-                }
-            }
+            //TODO: Julijana - I ovde pozovi constant folding i constant propagation
 
             errs() << Changed << " changed!\n";
             return Changed;
@@ -70,20 +70,35 @@ namespace {
             AU.setPreservesAll();
         }
 
-        bool isInvariantInstruction(Instruction *I, Loop *L, BasicBlock *BB, DominatorTree &DT) {
+        bool isInvariantInstruction(Instruction *I, Loop *L, DominatorTree &DT, std::vector < Instruction * > instructionsToMove) {
             if (isDesiredInstructionType(I) &&
                 areAllOperandsConstantsOrComputedOutsideLoop(I, L) &&
                 isSafeToSpeculativelyExecute(I) &&
-                doesBlockDominateAllExitBlocks(BB, L, &DT)) {
+                doesBlockDominateAllExitBlocks(I->getParent(), L, &DT)) {
+                instructionsToMove.push_back(I);
                 return true;
             }
 
             if (auto *SI = dyn_cast<StoreInst>(I)) {
-                if (!isChangedAfterInstruction(SI, SI->getPointerOperand(), L)) {
+                if (!isReferencedInLoop(SI, SI->getPointerOperand(), L)) {
                     Value *StoredVal = SI->getValueOperand();
-                    if (isa<Constant>(StoredVal) || isDefinedOutsideLoop(StoredVal, L)) {
+                    if (isa<Constant>(StoredVal)) {
+                        instructionsToMove.push_back(I);
                         return true;
                     }
+                }
+            }
+
+            if(isIncrementOrDecrement(I)){
+                auto *SI = cast<StoreInst>(I->getNextNode());
+                Value *storedPointer = SI->getPointerOperand();
+                if (!isReferencedInLoop(SI, SI->getPointerOperand(), L) && L->getLoopLatch() != I->getParent() && L->getHeader() != I->getParent()) {
+                /*TODO: Petra - Ovde izbrises load koji je sigurno iznad ove instrukcije
+                                Onda promenis jedan operand (koji je promenljiva) da bude ono sto je bilo i load-u
+                                Onda pomnozis drugi operand (koji je konstanta) sa brojem iteracija petlje (mozda mora nova instrukcija da se doda iznad ove za ovo)
+                                Onda ovu instrukciju/e i store koji je ispred ove instrukcije push_back u instructionsToMove*/
+                errs() << "Increment!\n" << *I << "\n";
+                return true;
                 }
             }
 
@@ -94,8 +109,7 @@ namespace {
             return isa<BinaryOperator>(I) ||
                    isa<SelectInst>(I) ||
                    isa<CastInst>(I) ||
-                   isa<GetElementPtrInst>(I) ||
-                   isa<LoadInst>(I);
+                   isa<GetElementPtrInst>(I);
         }
 
         bool areAllOperandsConstantsOrComputedOutsideLoop(Instruction *I, Loop *L) {
@@ -143,19 +157,46 @@ namespace {
             return true;
         }
 
-        bool isChangedAfterInstruction(Instruction *StartInst, Value *Ptr, Loop *L) {
-            bool StartFound = false;
+        bool isReferencedInLoop(Instruction *StartInst, Value *Ptr, Loop *L) {
             for (BasicBlock *BB : L->blocks()) {
                 for (Instruction &I : *BB) {
-                    if (&I == StartInst) {
-                        StartFound = true;
-                        continue;
-                    }
-
-                    if (StartFound) {
+                    if(&I != StartInst) {
                         if (auto *SI = dyn_cast<StoreInst>(&I)) {
                             if (SI->getPointerOperand() == Ptr) {
                                 return true;
+                            }
+                        }
+                        if (auto *CI = dyn_cast<CmpInst>(&I)) {
+                            for (Use &U : CI->operands()) {
+                                Value *V = U.get();
+                                if (V == Ptr) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+
+                }
+            }
+            return false;
+        }
+
+        bool isIncrementOrDecrement(Instruction *I) {
+            if (auto *BI = dyn_cast<BinaryOperator>(I)) {
+                if (BI->getOpcode() == Instruction::Add || BI->getOpcode() == Instruction::Sub) {
+                    if (I->getPrevNode() && isa<LoadInst>(I->getPrevNode())) {
+                        auto *LI = cast<LoadInst>(I->getPrevNode());
+                        Value *loadedValue = LI->getPointerOperand();
+
+                        if (I->getNextNode() && isa<StoreInst>(I->getNextNode())) {
+                            auto *SI = cast<StoreInst>(I->getNextNode());
+                            Value *storedPointer = SI->getPointerOperand();
+                            Value *storedValue = SI->getValueOperand();
+
+                            if (storedPointer == loadedValue && storedValue == I) {
+                                if (isa<ConstantInt>(BI->getOperand(1)) || isa<ConstantInt>(BI->getOperand(0))) {
+                                    return true;
+                                }
                             }
                         }
                     }
