@@ -89,16 +89,50 @@ namespace {
                 }
             }
 
-            if(isIncrementOrDecrement(I)){
+            
+            if (isIncrementOrDecrement(I)) {
                 auto *SI = cast<StoreInst>(I->getNextNode());
                 Value *storedPointer = SI->getPointerOperand();
-                if (!isReferencedInLoop(SI, SI->getPointerOperand(), L) && L->getLoopLatch() != I->getParent() && L->getHeader() != I->getParent()) {
-                /*TODO: Petra - Ovde izbrises load koji je sigurno iznad ove instrukcije
-                                Onda promenis jedan operand (koji je promenljiva) da bude ono sto je bilo i load-u
-                                Onda pomnozis drugi operand (koji je konstanta) sa brojem iteracija petlje (mozda mora nova instrukcija da se doda iznad ove za ovo)
-                                Onda ovu instrukciju/e i store koji je ispred ove instrukcije push_back u instructionsToMove*/
-                errs() << "Increment!\n" << *I << "\n";
-                return true;
+                if (!isReferencedInLoop(SI, storedPointer, L) && 
+                    L->getLoopLatch() != I->getParent() && 
+                    L->getHeader() != I->getParent()) {
+
+                    // 1. brisanje load instrukcije
+                    auto *LI = cast<LoadInst>(I->getPrevNode());
+                    Value *loadedValue = LI->getPointerOperand();
+                    LI->eraseFromParent();
+
+                    // 2. load u promenljivu
+                    Value *VarOperand = nullptr;
+                    ConstantInt *ConstOperand = nullptr;
+                    if (isa<ConstantInt>(I->getOperand(0))) {
+                        ConstOperand = cast<ConstantInt>(I->getOperand(0));
+                        VarOperand = I->getOperand(1);
+                    } else {
+                        ConstOperand = cast<ConstantInt>(I->getOperand(1));
+                        VarOperand = I->getOperand(0);
+                    }
+                    I->setOperand(0, loadedValue);
+                    I->setOperand(1, ConstOperand);
+
+                    // 3. konstanta * iteracije
+                    PHINode *IndVar = L->getCanonicalInductionVariable();
+                    assert(IndVar && "Loop does not have a canonical induction variable");
+                    Value *LoopBound = IndVar->getIncomingValueForBlock(L->getLoopLatch());
+                    assert(isa<ConstantInt>(LoopBound) && "Loop bound is not a constant");
+                    ConstantInt *Iterations = cast<ConstantInt>(LoopBound);
+                    APInt TotalInc = ConstOperand->getValue() * Iterations->getValue();
+                    ConstantInt *NewConst = ConstantInt::get(ConstOperand->getType(), TotalInc);
+
+                    // const = new const
+                    I->setOperand(ConstOperand == I->getOperand(0) ? 0 : 1, NewConst);
+
+                    // 4. Push to instructionsToMove
+                    instructionsToMove.push_back(I);
+                    instructionsToMove.push_back(SI);
+
+                    errs() << "Increment!\n" << *I << "\n";
+                    return true;
                 }
             }
 
