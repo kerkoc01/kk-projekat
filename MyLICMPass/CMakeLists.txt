@@ -1,6 +1,9 @@
 add_llvm_library( MyLICMPass MODULE
-        MyLICMPass.cpp
 
+        ConstantFolding.cpp
+        
+        MyLICMPass.cpp
+        
         PLUGIN_TOOL
         opt
 )
