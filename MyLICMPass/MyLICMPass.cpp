@@ -14,9 +14,9 @@
 #include "llvm/IR/Value.h"
 #include <vector>
 
-#include "ConstantFolding.h"
-
 using namespace llvm;
+
+void performConstantFolding(Function &F);
 
 namespace {
     struct MyLICMPass : public FunctionPass {
@@ -31,10 +31,11 @@ namespace {
 
             errs() << "Processing function: " << F.getName() << "\n";
 
-            bool change = performConstantFolding(F);
+	    bool change = performConstantFolding(F);
             if (change) {
                 errs() << "Performed ConstantFolding.\n";
             }
+            performConstantFolding(F);
 
             do {
                 CurrChanged = false;
@@ -63,10 +64,11 @@ namespace {
                 }
             } while (CurrChanged);
 
-            change = performConstantFolding(F);
+            bool change = performConstantFolding(F);
             if (change) {
                 errs() << "Performed ConstantFolding.\n";
             }
+            performConstantFolding(F);
 
             errs() << Changed << " changed!\n";
             return Changed;
@@ -211,119 +213,116 @@ namespace {
 char MyLICMPass::ID = 0;
 static RegisterPass<MyLICMPass> X("my-licm", "My Loop Invariant Code Motion Pass", false, false);
 
-// void handleBinaryOperator(Instruction &I, std::vector<Instruction *> &InstructionsToRemove);
-// void handleCompareInstruction(Instruction &I, std::vector<Instruction *> &InstructionsToRemove);
-// void handleBranchInstruction(Instruction &I, std::vector<Instruction *> &InstructionsToRemove);
+void handleBinaryOperator(Instruction &I, std::vector<Instruction *> &InstructionsToRemove);
+void handleCompareInstruction(Instruction &I, std::vector<Instruction *> &InstructionsToRemove);
+void handleBranchInstruction(Instruction &I, std::vector<Instruction *> &InstructionsToRemove);
 
-// bool performConstantFolding(Function &F) {
-//     std::vector<Instruction *> InstructionsToRemove;
-//     bool changed = false;
+void performConstantFolding(Function &F) {
+    std::vector<Instruction *> InstructionsToRemove;
 
-//     for (BasicBlock &BB : F) {
-//         for (Instruction &I : BB) {
-//             if (isa<BinaryOperator>(&I)) {
-//                 handleBinaryOperator(I, InstructionsToRemove);
-//             } else if (isa<ICmpInst>(&I)) {
-//                 handleCompareInstruction(I, InstructionsToRemove);
-//             } else if (isa<BranchInst>(&I)) {
-//                 handleBranchInstruction(I, InstructionsToRemove);
-//             }
-//         }
-//     }
+    for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+            if (isa<BinaryOperator>(&I)) {
+                handleBinaryOperator(I, InstructionsToRemove);
+            } else if (isa<ICmpInst>(&I)) {
+                handleCompareInstruction(I, InstructionsToRemove);
+            } else if (isa<BranchInst>(&I)) {
+                handleBranchInstruction(I, InstructionsToRemove);
+            }
+        }
+    }
 
-//     for (Instruction *Instr : InstructionsToRemove) {
-//         Instr->eraseFromParent();
-//         changed = true;
-//     }
+    for (Instruction *Instr : InstructionsToRemove) {
+        Instr->eraseFromParent();
+    }
+}
 
-//     return changed;
-// }
+void handleBinaryOperator(Instruction &I, std::vector<Instruction *> &InstructionsToRemove) {
+    Value *Lhs = I.getOperand(0), *Rhs = I.getOperand(1);
+    if (ConstantInt *LhsValue = dyn_cast<ConstantInt>(Lhs)) {
+        if (ConstantInt *RhsValue = dyn_cast<ConstantInt>(Rhs)) {
+            int64_t Value = 0;
+            switch (I.getOpcode()) {
+                case Instruction::Add:
+                    Value = LhsValue->getSExtValue() + RhsValue->getSExtValue();
+                    break;
+                case Instruction::Sub:
+                    Value = LhsValue->getSExtValue() - RhsValue->getSExtValue();
+                    break;
+                case Instruction::Mul:
+                    Value = LhsValue->getSExtValue() * RhsValue->getSExtValue();
+                    break;
+                case Instruction::SDiv:
+                    if (RhsValue->getSExtValue() == 0) {
+                        errs() << "Division by zero is not allowed!\n";
+                        return;
+                    }
+                    Value = LhsValue->getSExtValue() / RhsValue->getSExtValue();
+                    break;
+                default:
+                    return;
+            }
 
-// void handleBinaryOperator(Instruction &I, std::vector<Instruction *> &InstructionsToRemove) {
-//     Value *Lhs = I.getOperand(0), *Rhs = I.getOperand(1);
-//     if (ConstantInt *LhsValue = dyn_cast<ConstantInt>(Lhs)) {
-//         if (ConstantInt *RhsValue = dyn_cast<ConstantInt>(Rhs)) {
-//             int64_t Value = 0;
-//             switch (I.getOpcode()) {
-//                 case Instruction::Add:
-//                     Value = LhsValue->getSExtValue() + RhsValue->getSExtValue();
-//                     break;
-//                 case Instruction::Sub:
-//                     Value = LhsValue->getSExtValue() - RhsValue->getSExtValue();
-//                     break;
-//                 case Instruction::Mul:
-//                     Value = LhsValue->getSExtValue() * RhsValue->getSExtValue();
-//                     break;
-//                 case Instruction::SDiv:
-//                     if (RhsValue->getSExtValue() == 0) {
-//                         errs() << "Division by zero is not allowed!\n";
-//                         return;
-//                     }
-//                     Value = LhsValue->getSExtValue() / RhsValue->getSExtValue();
-//                     break;
-//                 default:
-//                     return;
-//             }
-
-//             I.replaceAllUsesWith(ConstantInt::get(I.getType(), Value));
-//             InstructionsToRemove.push_back(&I);
-//         }
-//     }
-// }
+            I.replaceAllUsesWith(ConstantInt::get(I.getType(), Value));
+            InstructionsToRemove.push_back(&I);
+        }
+    }
+}
 
 
-// void handleCompareInstruction(Instruction &I, std::vector<Instruction *> &InstructionsToRemove) {
-//     Value *Lhs = I.getOperand(0), *Rhs = I.getOperand(1);
-//     if (ConstantInt *LhsValue = dyn_cast<ConstantInt>(Lhs)) {
-//         if (ConstantInt *RhsValue = dyn_cast<ConstantInt>(Rhs)) {
-//             bool Value = false;
-//             ICmpInst *Cmp = cast<ICmpInst>(&I);
-//             switch (Cmp->getPredicate()) {
-//                 case ICmpInst::ICMP_EQ:
-//                     Value = LhsValue->getSExtValue() == RhsValue->getSExtValue();
-//                     break;
-//                 case ICmpInst::ICMP_NE:
-//                     Value = LhsValue->getSExtValue() != RhsValue->getSExtValue();
-//                     break;
-//                 case ICmpInst::ICMP_SGT:
-//                     Value = LhsValue->getSExtValue() > RhsValue->getSExtValue();
-//                     break;
-//                 case ICmpInst::ICMP_SLT:
-//                     Value = LhsValue->getSExtValue() < RhsValue->getSExtValue();
-//                     break;
-//                 case ICmpInst::ICMP_SGE:
-//                     Value = LhsValue->getSExtValue() >= RhsValue->getSExtValue();
-//                     break;
-//                 case ICmpInst::ICMP_SLE:
-//                     Value = LhsValue->getSExtValue() <= RhsValue->getSExtValue();
-//                     break;
-//                 default:
-//                     return;
-//             }
+void handleCompareInstruction(Instruction &I, std::vector<Instruction *> &InstructionsToRemove) {
+    Value *Lhs = I.getOperand(0), *Rhs = I.getOperand(1);
+    if (ConstantInt *LhsValue = dyn_cast<ConstantInt>(Lhs)) {
+        if (ConstantInt *RhsValue = dyn_cast<ConstantInt>(Rhs)) {
+            bool Value = false;
+            ICmpInst *Cmp = cast<ICmpInst>(&I);
+            switch (Cmp->getPredicate()) {
+                case ICmpInst::ICMP_EQ:
+                    Value = LhsValue->getSExtValue() == RhsValue->getSExtValue();
+                    break;
+                case ICmpInst::ICMP_NE:
+                    Value = LhsValue->getSExtValue() != RhsValue->getSExtValue();
+                    break;
+                case ICmpInst::ICMP_SGT:
+                    Value = LhsValue->getSExtValue() > RhsValue->getSExtValue();
+                    break;
+                case ICmpInst::ICMP_SLT:
+                    Value = LhsValue->getSExtValue() < RhsValue->getSExtValue();
+                    break;
+                case ICmpInst::ICMP_SGE:
+                    Value = LhsValue->getSExtValue() >= RhsValue->getSExtValue();
+                    break;
+                case ICmpInst::ICMP_SLE:
+                    Value = LhsValue->getSExtValue() <= RhsValue->getSExtValue();
+                    break;
+                default:
+                    return;
+            }
 
-//             I.replaceAllUsesWith(ConstantInt::get(I.getType(), Value));
-//             InstructionsToRemove.push_back(&I);
-//         }
-//     }
-// }
+            I.replaceAllUsesWith(ConstantInt::get(I.getType(), Value));
+            InstructionsToRemove.push_back(&I);
+        }
+    }
+}
 
 
-// void handleBranchInstruction(Instruction &I, std::vector<Instruction *> &InstructionsToRemove) {
-//     BranchInst *BranchInstr = dyn_cast<BranchInst>(&I);
-//     if (BranchInstr->isConditional()) {
-//         if (ConstantInt *Condition = dyn_cast<ConstantInt>(BranchInstr->getCondition())) {
-//             if (Condition->isOne()) {
-//                 // Always take the true branch
-//                 BasicBlock *TrueBB = BranchInstr->getSuccessor(0);
-//                 BranchInst::Create(TrueBB, BranchInstr->getParent());
-//             } else {
-//                 // Always take the false branch
-//                 BasicBlock *FalseBB = BranchInstr->getSuccessor(1);
-//                 BranchInst::Create(FalseBB, BranchInstr->getParent());
-//             }
+void handleBranchInstruction(Instruction &I, std::vector<Instruction *> &InstructionsToRemove) {
+    BranchInst *BranchInstr = dyn_cast<BranchInst>(&I);
+    if (BranchInstr->isConditional()) {
+        if (ConstantInt *Condition = dyn_cast<ConstantInt>(BranchInstr->getCondition())) {
+            if (Condition->isOne()) {
+                // Always take the true branch
+                BasicBlock *TrueBB = BranchInstr->getSuccessor(0);
+                BranchInst::Create(TrueBB, BranchInstr->getParent());
+            } else {
+                // Always take the false branch
+                BasicBlock *FalseBB = BranchInstr->getSuccessor(1);
+                BranchInst::Create(FalseBB, BranchInstr->getParent());
+            }
 
-//             InstructionsToRemove.push_back(&I);
-//         }
-//     }
-// }
+            InstructionsToRemove.push_back(&I);
+        }
+    }
+}
+
 
