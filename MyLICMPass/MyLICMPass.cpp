@@ -12,6 +12,7 @@
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Value.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/Support/raw_ostream.h"
 #include <vector>
 
@@ -97,7 +98,7 @@ namespace {
             }
 
             if (isIncrementOrDecrement(I)) {
-                uint64_t Iterations;
+                Value* Iterations;
                 if (getLoopIterationCount(L, Iterations)) {
                     if (auto *SI = dyn_cast<StoreInst>(I->getNextNode())) {
                         Value *storedPointer = SI->getPointerOperand();
@@ -120,10 +121,9 @@ namespace {
                                 }
 
                                 // 3. Constant * iterations
-                                APInt Op = ConstOperand->getValue();
-                                APInt Result = Op * Iterations;
-                                ConstantInt *NewConst = ConstantInt::get(ConstOperand->getContext(), Result);
-                                I->setOperand(ConstOperand == I->getOperand(0) ? 0 : 1, NewConst);
+                                IRBuilder<> builder(L->getLoopPreheader()->getTerminator());
+                                Value *Result = builder.CreateMul(ConstOperand, Iterations);
+                                I->setOperand(ConstOperand == I->getOperand(0) ? 0 : 1, Result);
 
                                 instructionsToMove.push_back(I);
                                 instructionsToMove.push_back(SI);
@@ -138,106 +138,80 @@ namespace {
             return false;
         }
 
-        bool getLoopIterationCount(Loop *L, uint64_t &Iterations) {
-            // Get the canonical induction variable
-            PHINode *InductionVar = L->getCanonicalInductionVariable();
-            if (!InductionVar)
-                return false;
+        bool getLoopIterationCount(Loop *L, Value* Iterations) {
+            BasicBlock* Header = L->getHeader();
+            Value *HeaderOp = nullptr;
 
-            // Get the preheader, header, and latch blocks
-            BasicBlock *Preheader = L->getLoopPreheader();
-            BasicBlock *Header = L->getHeader();
-            BasicBlock *Latch = L->getLoopLatch();
-            if (!Preheader || !Header || !Latch)
-                return false;
-
-            // Get the initial value of the induction variable
-            Value *InitialValue = InductionVar->getIncomingValueForBlock(Preheader);
-            ConstantInt *InitVal = dyn_cast<ConstantInt>(InitialValue);
-            if (!InitVal)
-                return false;
-
-            // Get the step value of the induction variable
-            Value *StepValue = nullptr;
-            for (auto &I : *Latch) {
-                if (auto *Inc = dyn_cast<BinaryOperator>(&I)) {
-                    if (Inc->getOperand(0) == InductionVar || Inc->getOperand(1) == InductionVar) {
-                        StepValue = (Inc->getOperand(0) == InductionVar) ? Inc->getOperand(1) : Inc->getOperand(0);
-                        break;
+            for (Instruction &I : *Header) {
+                if (auto *CI = dyn_cast<CmpInst>(&I)) {
+                    if (CI->getOpcode() == Instruction::ICmp) {
+                        if(HeaderOp != nullptr){
+                            return false;
+                        }
+                        HeaderOp = CI->getOperand(1);
                     }
                 }
             }
-            ConstantInt *StepVal = dyn_cast<ConstantInt>(StepValue);
-            if (!StepVal)
-                return false;
 
-            // Get the loop's exit condition
-            BranchInst *BI = dyn_cast<BranchInst>(Header->getTerminator());
-            if (!BI || !BI->isConditional())
-                return false;
-
-            ICmpInst *Cond = dyn_cast<ICmpInst>(BI->getCondition());
-            if (!Cond)
-                return false;
-
-            Value *Bound = Cond->getOperand(1);
-            ConstantInt *BoundVal = dyn_cast<ConstantInt>(Bound);
-            if (!BoundVal)
-                return false;
-
-            // Calculate the number of iterations
-            APInt Initial = InitVal->getValue();
-            APInt Step = StepVal->getValue();
-            APInt End = BoundVal->getValue();
-
-            ICmpInst::Predicate Pred = Cond->getPredicate();
-            bool IsSigned = Cond->isSigned();
-
-            if (Pred == ICmpInst::ICMP_SLT || Pred == ICmpInst::ICMP_ULT) {
-                if (IsSigned) {
-                    if (Step.isNegative()) {
-                        Iterations = ((Initial - End - Step + 1).sdiv(-Step)).getLimitedValue();
-                    } else {
-                        Iterations = ((End - Initial - Step + 1).sdiv(Step)).getLimitedValue();
+            for (BasicBlock *BB: L->blocks()) {
+                if(BB != Header) {
+                    for (Instruction &I: *BB) {
+                        if (auto *SI = dyn_cast<StoreInst>(&I)) {
+                            if (SI->getPointerOperand() == HeaderOp) {
+                                return false;
+                            }
+                        }
+                        if (auto *CI = dyn_cast<CmpInst>(&I)) {
+                            for (Use &U: CI->operands()) {
+                                Value *V = U.get();
+                                if (V == HeaderOp) {
+                                    return false;
+                                }
+                            }
+                        }
                     }
-                } else {
-                    Iterations = ((End - Initial - Step + 1).udiv(Step)).getLimitedValue();
                 }
-            } else if (Pred == ICmpInst::ICMP_SLE || Pred == ICmpInst::ICMP_ULE) {
-                if (IsSigned) {
-                    if (Step.isNegative()) {
-                        Iterations = ((Initial - End - Step).sdiv(-Step)).getLimitedValue();
-                    } else {
-                        Iterations = ((End - Initial - Step).sdiv(Step)).getLimitedValue();
-                    }
-                } else {
-                    Iterations = ((End - Initial - Step).udiv(Step)).getLimitedValue();
-                }
-            } else if (Pred == ICmpInst::ICMP_SGT || Pred == ICmpInst::ICMP_UGT) {
-                if (IsSigned) {
-                    if (!Step.isNegative()) {
-                        Iterations = ((Initial - End - Step + 1).sdiv(Step)).getLimitedValue();
-                    } else {
-                        Iterations = ((End - Initial - Step + 1).sdiv(-Step)).getLimitedValue();
-                    }
-                } else {
-                    Iterations = ((Initial - End - Step + 1).udiv(Step)).getLimitedValue();
-                }
-            } else if (Pred == ICmpInst::ICMP_SGE || Pred == ICmpInst::ICMP_UGE) {
-                if (IsSigned) {
-                    if (!Step.isNegative()) {
-                        Iterations = ((Initial - End - Step).sdiv(Step)).getLimitedValue();
-                    } else {
-                        Iterations = ((End - Initial - Step).sdiv(-Step)).getLimitedValue();
-                    }
-                } else {
-                    Iterations = ((Initial - End - Step).udiv(Step)).getLimitedValue();
-                }
-            } else {
-                return false;
             }
 
-            return true;
+            BasicBlock* Latch = L->getLoopLatch();
+            Value *LatchOp = nullptr;
+
+            for (Instruction &I : *Latch) {
+                if (auto *AddInst = dyn_cast<BinaryOperator>(&I)) {
+                    if (AddInst->getOpcode() == Instruction::Add) {
+                        if(LatchOp != nullptr){
+                            return false;
+                        }
+                        LatchOp = AddInst->getOperand(1);
+                    }
+                }
+            }
+
+            for (BasicBlock *BB: L->blocks()) {
+                if(BB != Latch) {
+                    for (Instruction &I: *BB) {
+                        if (auto *SI = dyn_cast<StoreInst>(&I)) {
+                            if (SI->getPointerOperand() == LatchOp) {
+                                return false;
+                            }
+                        }
+                        if (auto *CI = dyn_cast<CmpInst>(&I)) {
+                            for (Use &U: CI->operands()) {
+                                Value *V = U.get();
+                                if (V == LatchOp) {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            IRBuilder<> builder(L->getLoopPreheader()->getTerminator());
+            Value *Result = builder.CreateSDiv(HeaderOp, LatchOp);
+
+            return  true;
+
         }
 
         bool isDesiredInstructionType(Instruction *I) {
