@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "ConstantFolding.h"
+#include "OurConstantPropagation.h"
 
 using namespace llvm;
 
@@ -35,6 +36,7 @@ namespace {
             if (change) {
                 errs() << "Performed ConstantFolding.\n";
             }
+            performConstantPropagation(F);
 
             do {
                 CurrChanged = false;
