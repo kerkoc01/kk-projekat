@@ -12,6 +12,7 @@
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Value.h"
+#include "llvm/Support/raw_ostream.h"
 #include <vector>
 
 using namespace llvm;
@@ -96,35 +97,29 @@ namespace {
             }
 
             if (isIncrementOrDecrement(I)) {
-                if (auto *SI = dyn_cast<StoreInst>(I->getNextNode())) {
-                    Value *storedPointer = SI->getPointerOperand();
-                    if (!isReferencedInLoop(SI, SI->getPointerOperand(), L) && L->getLoopLatch() != I->getParent() &&
-                        L->getHeader() != I->getParent()) {
-                        /*TODO: Petra - Ovde izbrises load koji je sigurno iznad ove instrukcije
-                                        Onda promenis jedan operand (koji je promenljiva) da bude ono sto je bilo i load-u
-                                        Onda pomnozis drugi operand (koji je konstanta) sa brojem iteracija petlje (mozda mora nova instrukcija da se doda iznad ove za ovo)
-                                        Onda ovu instrukciju/e i store koji je ispred ove instrukcije push_back u instructionsToMove*/
+                uint64_t Iterations;
+                if (getLoopIterationCount(L, Iterations)) {
+                    if (auto *SI = dyn_cast<StoreInst>(I->getNextNode())) {
+                        Value *storedPointer = SI->getPointerOperand();
+                        if (!isReferencedInLoop(SI, SI->getPointerOperand(), L) &&
+                            L->getLoopLatch() != I->getParent() &&
+                            L->getHeader() != I->getParent()) {
 
-                        if (auto *LI = dyn_cast<LoadInst>(I->getPrevNode())) {
-                            Value *loadedValue = LI->getPointerOperand();
-                            LI->eraseFromParent();
+                            if (auto *LI = dyn_cast<LoadInst>(I->getPrevNode())) {
+                                Value *loadedValue = LI->getPointerOperand();
+                                LI->eraseFromParent();
 
-                            // 2. Identify operands
-                            Value *VarOperand = nullptr;
-                            ConstantInt *ConstOperand = nullptr;
-                            if (isa<ConstantInt>(I->getOperand(0))) {
-                                ConstOperand = cast<ConstantInt>(I->getOperand(0));
-                                VarOperand = I->getOperand(1);
-                                I->setOperand(1, loadedValue);
-                            } else {
-                                ConstOperand = cast<ConstantInt>(I->getOperand(1));
-                                VarOperand = I->getOperand(0);
-                                I->setOperand(0, loadedValue);
-                            }
+                                // 2. Identify operands
+                                ConstantInt *ConstOperand = nullptr;
+                                if (isa<ConstantInt>(I->getOperand(0))) {
+                                    ConstOperand = cast<ConstantInt>(I->getOperand(0));
+                                    I->setOperand(1, loadedValue);
+                                } else {
+                                    ConstOperand = cast<ConstantInt>(I->getOperand(1));
+                                    I->setOperand(0, loadedValue);
+                                }
 
-                            // 3. Constant * iterations
-                            uint64_t Iterations;
-                            if (getLoopIterationCount(L, Iterations)) {
+                                // 3. Constant * iterations
                                 APInt Op = ConstOperand->getValue();
                                 APInt Result = Op * Iterations;
                                 ConstantInt *NewConst = ConstantInt::get(ConstOperand->getContext(), Result);
@@ -134,10 +129,7 @@ namespace {
                                 instructionsToMove.push_back(SI);
 
                                 return true;
-                            } else {
-                                return false;
                             }
-
                         }
                     }
                 }
