@@ -97,7 +97,7 @@ namespace {
                 }
             }
 
-            if (isIncrementOrDecrement(I)) {
+            if (isIncrementOrDecrement(I) && I->getParent() != L->getHeader() && I->getParent() != L->getLoopLatch()) {
                 Value* Iterations;
                 if (getLoopIterationCount(L, Iterations)) {
                     errs() << "OVDE 1\n";
@@ -138,30 +138,6 @@ namespace {
             return false;
         }
 
-        bool isReferencedInLoopOutsideOfBlock(Loop *L, Value *ConstV, BasicBlock *ExceptionBlock){
-            for (BasicBlock *BB: L->blocks()) {
-                if(BB != ExceptionBlock) {
-                    for (Instruction &I: *BB) {
-                        if (auto *SI = dyn_cast<StoreInst>(&I)) {
-                            if (SI->getPointerOperand() == ConstV) {
-                                return true;
-                            }
-                        }
-                        if (auto *CI = dyn_cast<CmpInst>(&I)) {
-                            for (Use &U: CI->operands()) {
-                                Value *V = U.get();
-                                if (V == ConstV) {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            return false;
-        }
-
         bool getLoopIterationCount(Loop *L, Value* Iterations) {
             BasicBlock* Header = L->getHeader();
             Value *HeaderOp = nullptr;
@@ -173,13 +149,13 @@ namespace {
                             return false;
                         }
                         HeaderOp = CI->getOperand(1);
+                        if(!isChangedInLoop(&I, HeaderOp, L)){
+                            return false;
+                        }
                     }
                 }
             }
 
-            if(!isReferencedInLoopOutsideOfBlock(L, HeaderOp, Header)){
-                return false;
-            }
 
             BasicBlock* Latch = L->getLoopLatch();
             Value *LatchOp = nullptr;
@@ -191,12 +167,11 @@ namespace {
                             return false;
                         }
                         LatchOp = AddInst->getOperand(1);
+                        if (!isa<ConstantInt>(LatchOp)) {
+                            return false;
+                        }
                     }
                 }
-            }
-
-            if(!isReferencedInLoopOutsideOfBlock(L, LatchOp, Latch)){
-                return false;
             }
 
             IRBuilder<> builder(L->getLoopPreheader()->getTerminator());
