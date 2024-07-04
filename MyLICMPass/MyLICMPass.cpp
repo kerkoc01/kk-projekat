@@ -26,7 +26,7 @@ namespace {
 
         bool runOnFunction(Function &F) override {
             bool Changed = false;
-            bool CurrChanged = false;
+            //bool CurrChanged = false;
             LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
             DominatorTree &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
 
@@ -40,29 +40,27 @@ namespace {
 
             //performConstantFolding(F);
 
-            do {
-                for (Loop *L: LI) {
-                    if (!L->getLoopPreheader()) {
-                        errs() << "No loop preheader, skipping loop.\n";
-                        continue;
-                    }
+            for (Loop *L: LI) {
+                if (!L->getLoopPreheader()) {
+                    errs() << "No loop preheader, skipping loop.\n";
+                    continue;
+                }
 
-                    std::vector < Instruction * > instructionsToMove;
+                std::vector<Instruction *> instructionsToMove;
 
-                    for (BasicBlock *BB: L->blocks()) {
-                        for (Instruction &I: *BB) {
-                            CurrChanged = isInvariantInstruction(&I, L, DT, instructionsToMove);
-                            Changed |= CurrChanged;
-                        }
-                    }
-
-                    for (Instruction *I: instructionsToMove) {
-                        errs() << "Instruction to move: " << *I << "\n";
-                        errs() << "Where to move it: " << *L->getLoopPreheader()->getTerminator() << "\n";
-                        I->moveBefore(L->getLoopPreheader()->getTerminator());
+                for (BasicBlock *BB: L->blocks()) {
+                    for (Instruction &I: *BB) {
+                        Changed |= isInvariantInstruction(&I, L, DT, instructionsToMove);
                     }
                 }
-            } while (CurrChanged);
+
+                for (Instruction *I: instructionsToMove) {
+                    errs() << "Instruction to move: " << *I << "\n";
+                    errs() << "Where to move it: " << *L->getLoopPreheader()->getTerminator() << "\n";
+                    I->moveBefore(L->getLoopPreheader()->getTerminator());
+                }
+
+            }
 
             //TODO: Julijana - I ovde pozovi constant folding i constant propagation
             //performConstantFolding(F);
@@ -77,56 +75,49 @@ namespace {
             AU.setPreservesAll();
         }
 
-        bool isInvariantInstruction(Instruction *I, Loop *L, DominatorTree &DT,
-                                    std::vector<Instruction *> instructionsToMove) {
+        bool isInvariantInstruction(Instruction *I, Loop *L, DominatorTree &DT, std::vector<Instruction *>& instructionsToMove) {
             if (isDesiredInstructionType(I) &&
                 areAllOperandsConstantsOrComputedOutsideLoop(I, L) &&
                 isSafeToSpeculativelyExecute(I) &&
                 doesBlockDominateAllExitBlocks(I->getParent(), L, &DT)) {
                 instructionsToMove.push_back(I);
-                return true;
             }
 
-            if (auto *SI = dyn_cast<StoreInst>(I)) {
+            else if (auto *SI = dyn_cast<StoreInst>(I)) {
                 if (!isChangedInLoop(SI, SI->getPointerOperand(), L)) {
                     Value *StoredVal = SI->getValueOperand();
                     if (isa<Constant>(StoredVal)) {
                         instructionsToMove.push_back(I);
-                        return true;
                     }
                 }
             }
 
-            if (isIncrementOrDecrement(I) && I->getParent() != L->getHeader() && I->getParent() != L->getLoopLatch()) {
-                Value* Iterations;
-                if (getLoopIterationCount(L, Iterations)) {
-                    errs() << "OVDE 1\n";
+            else if (isIncrementOrDecrement(I) && I->getParent() != L->getHeader() && I->getParent() != L->getLoopLatch()) {
+                Value* Iterations = getLoopIterationCount(L);
+                if (Iterations != nullptr) {
                     if (auto *SI = dyn_cast<StoreInst>(I->getNextNode())) {
-                        errs() << "OVDE 2\n";
                         if (auto *LI = dyn_cast<LoadInst>(I->getPrevNode())) {
-                            errs() << "OVDE 3\n";
                             if (!isReferencedInLoop(SI, LI, SI->getPointerOperand(), L)) {
-                                errs() << "OVDE 4\n";
                                 Value *loadedValue = LI->getPointerOperand();
-                                LI->eraseFromParent();
-
-                                // 2. Identify operands
                                 ConstantInt *ConstOperand = nullptr;
                                 if (isa<ConstantInt>(I->getOperand(0))) {
                                     ConstOperand = cast<ConstantInt>(I->getOperand(0));
-                                    I->setOperand(1, loadedValue);
                                 } else {
                                     ConstOperand = cast<ConstantInt>(I->getOperand(1));
-                                    I->setOperand(0, loadedValue);
                                 }
-                                errs() << "OVDE 5\n";
-                                // 3. Constant * iterations
+
                                 IRBuilder<> builder(L->getLoopPreheader()->getTerminator());
-                                Value *Result = builder.CreateMul(ConstOperand, Iterations);
+                                ConstantInt *IterationsConst = cast<ConstantInt>(Iterations);
+                                Value *Result = builder.CreateMul(ConstOperand, IterationsConst);
                                 I->setOperand(ConstOperand == I->getOperand(0) ? 0 : 1, Result);
 
+                                instructionsToMove.push_back(LI);
                                 instructionsToMove.push_back(I);
                                 instructionsToMove.push_back(SI);
+
+                                for (Instruction *I: instructionsToMove) {
+                                    errs() << *I << "\n";
+                                }
 
                                 return true;
                             }
@@ -138,7 +129,7 @@ namespace {
             return false;
         }
 
-        bool getLoopIterationCount(Loop *L, Value* Iterations) {
+        Value* getLoopIterationCount(Loop *L) {
             BasicBlock* Header = L->getHeader();
             Value *HeaderOp = nullptr;
 
@@ -146,11 +137,11 @@ namespace {
                 if (auto *CI = dyn_cast<CmpInst>(&I)) {
                     if (CI->getOpcode() == Instruction::ICmp) {
                         if(HeaderOp != nullptr){
-                            return false;
+                            return nullptr;
                         }
                         HeaderOp = CI->getOperand(1);
                         if(!isa<ConstantInt>(HeaderOp) && isChangedInLoop(&I, HeaderOp, L)){
-                            return false;
+                            return nullptr;
                         }
                     }
                 }
@@ -164,22 +155,19 @@ namespace {
                 if (auto *AddInst = dyn_cast<BinaryOperator>(&I)) {
                     if (AddInst->getOpcode() == Instruction::Add) {
                         if(LatchOp != nullptr){
-                            return false;
+                            return nullptr;
                         }
                         LatchOp = AddInst->getOperand(1);
                         if (!isa<ConstantInt>(LatchOp)) {
-                            return false;
+                            return nullptr;
                         }
                     }
                 }
             }
 
             IRBuilder<> builder(L->getLoopPreheader()->getTerminator());
-            Value *Result = builder.CreateSDiv(HeaderOp, LatchOp);
 
-            errs() << "You can calculate loop count!\n";
-
-            return  true;
+            return  builder.CreateSDiv(HeaderOp, LatchOp);
 
         }
 
