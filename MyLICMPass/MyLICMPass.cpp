@@ -88,7 +88,7 @@ namespace {
             }
 
             if (auto *SI = dyn_cast<StoreInst>(I)) {
-                if (!isReferencedInLoop(SI, SI->getPointerOperand(), L)) {
+                if (!isChangedInLoop(SI, SI->getPointerOperand(), L)) {
                     Value *StoredVal = SI->getValueOperand();
                     if (isa<Constant>(StoredVal)) {
                         instructionsToMove.push_back(I);
@@ -100,13 +100,13 @@ namespace {
             if (isIncrementOrDecrement(I)) {
                 Value* Iterations;
                 if (getLoopIterationCount(L, Iterations)) {
+                    errs() << "OVDE 1\n";
                     if (auto *SI = dyn_cast<StoreInst>(I->getNextNode())) {
-                        Value *storedPointer = SI->getPointerOperand();
-                        if (!isReferencedInLoop(SI, SI->getPointerOperand(), L) &&
-                            L->getLoopLatch() != I->getParent() &&
-                            L->getHeader() != I->getParent()) {
-
-                            if (auto *LI = dyn_cast<LoadInst>(I->getPrevNode())) {
+                        errs() << "OVDE 2\n";
+                        if (auto *LI = dyn_cast<LoadInst>(I->getPrevNode())) {
+                            errs() << "OVDE 3\n";
+                            if (!isReferencedInLoop(SI, LI, SI->getPointerOperand(), L)) {
+                                errs() << "OVDE 4\n";
                                 Value *loadedValue = LI->getPointerOperand();
                                 LI->eraseFromParent();
 
@@ -119,7 +119,7 @@ namespace {
                                     ConstOperand = cast<ConstantInt>(I->getOperand(1));
                                     I->setOperand(0, loadedValue);
                                 }
-
+                                errs() << "OVDE 5\n";
                                 // 3. Constant * iterations
                                 IRBuilder<> builder(L->getLoopPreheader()->getTerminator());
                                 Value *Result = builder.CreateMul(ConstOperand, Iterations);
@@ -129,6 +129,30 @@ namespace {
                                 instructionsToMove.push_back(SI);
 
                                 return true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        bool isReferencedInLoopOutsideOfBlock(Loop *L, Value *ConstV, BasicBlock *ExceptionBlock){
+            for (BasicBlock *BB: L->blocks()) {
+                if(BB != ExceptionBlock) {
+                    for (Instruction &I: *BB) {
+                        if (auto *SI = dyn_cast<StoreInst>(&I)) {
+                            if (SI->getPointerOperand() == ConstV) {
+                                return true;
+                            }
+                        }
+                        if (auto *CI = dyn_cast<CmpInst>(&I)) {
+                            for (Use &U: CI->operands()) {
+                                Value *V = U.get();
+                                if (V == ConstV) {
+                                    return true;
+                                }
                             }
                         }
                     }
@@ -153,24 +177,8 @@ namespace {
                 }
             }
 
-            for (BasicBlock *BB: L->blocks()) {
-                if(BB != Header) {
-                    for (Instruction &I: *BB) {
-                        if (auto *SI = dyn_cast<StoreInst>(&I)) {
-                            if (SI->getPointerOperand() == HeaderOp) {
-                                return false;
-                            }
-                        }
-                        if (auto *CI = dyn_cast<CmpInst>(&I)) {
-                            for (Use &U: CI->operands()) {
-                                Value *V = U.get();
-                                if (V == HeaderOp) {
-                                    return false;
-                                }
-                            }
-                        }
-                    }
-                }
+            if(!isReferencedInLoopOutsideOfBlock(L, HeaderOp, Header)){
+                return false;
             }
 
             BasicBlock* Latch = L->getLoopLatch();
@@ -187,28 +195,14 @@ namespace {
                 }
             }
 
-            for (BasicBlock *BB: L->blocks()) {
-                if(BB != Latch) {
-                    for (Instruction &I: *BB) {
-                        if (auto *SI = dyn_cast<StoreInst>(&I)) {
-                            if (SI->getPointerOperand() == LatchOp) {
-                                return false;
-                            }
-                        }
-                        if (auto *CI = dyn_cast<CmpInst>(&I)) {
-                            for (Use &U: CI->operands()) {
-                                Value *V = U.get();
-                                if (V == LatchOp) {
-                                    return false;
-                                }
-                            }
-                        }
-                    }
-                }
+            if(!isReferencedInLoopOutsideOfBlock(L, LatchOp, Latch)){
+                return false;
             }
 
             IRBuilder<> builder(L->getLoopPreheader()->getTerminator());
             Value *Result = builder.CreateSDiv(HeaderOp, LatchOp);
+
+            errs() << "You can calculate loop count!\n";
 
             return  true;
 
@@ -266,21 +260,29 @@ namespace {
             return true;
         }
 
-        bool isReferencedInLoop(Instruction *StartInst, Value *Ptr, Loop *L) {
+        bool isReferencedInLoop(Instruction *StoreInst, Instruction *LoadInst, Value *Ptr, Loop *L) {
             for (BasicBlock *BB: L->blocks()) {
                 for (Instruction &I: *BB) {
-                    if (&I != StartInst) {
-                        if (auto *SI = dyn_cast<StoreInst>(&I)) {
-                            if (SI->getPointerOperand() == Ptr) {
+                    if (&I != StoreInst && &I != LoadInst) {
+                        for (Use &U: I.operands()) {
+                            Value *V = U.get();
+                            if(V == Ptr){
                                 return true;
                             }
                         }
-                        if (auto *CI = dyn_cast<CmpInst>(&I)) {
-                            for (Use &U: CI->operands()) {
-                                Value *V = U.get();
-                                if (V == Ptr) {
-                                    return true;
-                                }
+                    }
+                }
+            }
+            return false;
+        }
+
+        bool isChangedInLoop(Instruction *StartInst, Value *Ptr, Loop *L) {
+            for (BasicBlock *BB : L->blocks()) {
+                for (Instruction &I : *BB) {
+                    if(&I != StartInst) {
+                        if (auto *SI = dyn_cast<StoreInst>(&I)) {
+                            if (SI->getPointerOperand() == Ptr) {
+                                return true;
                             }
                         }
                     }
