@@ -149,7 +149,7 @@ namespace {
                             return false;
                         }
                         HeaderOp = CI->getOperand(1);
-                        if(!isChangedInLoop(&I, HeaderOp, L)){
+                        if(!isa<ConstantInt>(HeaderOp) && isChangedInLoop(&I, HeaderOp, L)){
                             return false;
                         }
                     }
