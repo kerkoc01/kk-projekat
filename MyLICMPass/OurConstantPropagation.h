@@ -3,7 +3,7 @@
 
 #include "llvm/IR/Function.h"
 
-void performConstantPropagation(llvm::Function &F);
+bool performConstantPropagation(llvm::Function &F);
 
 #endif // CONSTPROPAGATION_H
 
