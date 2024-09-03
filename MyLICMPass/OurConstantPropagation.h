@@ -3,7 +3,9 @@
 
 #include "llvm/IR/Function.h"
 
-bool performConstantPropagation(llvm::Function &F);
+using namespace llvm;
+
+bool performConstantPropagation(Function &F);
 
 #endif // CONSTPROPAGATION_H
 

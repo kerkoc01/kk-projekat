@@ -4,8 +4,9 @@
 #include "llvm/IR/Function.h"
 #include <vector>
 
-namespace llvm {
-    bool performConstantFolding(Function &F);
-}
+using namespace llvm;
+
+bool performConstantFolding(Function &F);
+
 
 #endif // CONSTANT_FOLDING_H

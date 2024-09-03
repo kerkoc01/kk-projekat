@@ -37,7 +37,7 @@ void propagateVariable(Value *Variable);
 void runAlgorithm();
 void modifyIR();
 
-bool performConstPropagation(Function &F) {
+bool performConstantPropagation(Function &F) {
     findAllVariables(F);
     findAllInstructions(F);
     setStatusForFirstInstruction();
@@ -329,7 +329,7 @@ void modifyIR()
 
     if (isa<StoreInst>(Instr)) {
       Value *Operand = Instr->getOperand(0);
-      if (CPI->getStatusBefore(VariablesMap[Operand]) == Const) {
+      if (Operand && CPI->getStatusBefore(VariablesMap[Operand]) == Const) {
         int Value = CPI->getValueBefore(VariablesMap[Operand]);
         ConstantInt *ConstInt = ConstantInt::get(Type::getInt32Ty(Instr->getContext()), Value);
         Operand->replaceAllUsesWith(ConstInt);
