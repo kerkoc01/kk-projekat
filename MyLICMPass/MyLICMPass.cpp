@@ -12,6 +12,7 @@
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Value.h"
+#include "llvm/IR/IRBuilder.h"
 #include <vector>
 
 #include "ConstantFolding.h"
@@ -38,32 +39,26 @@ namespace {
             }
             performConstantPropagation(F);
 
-            do {
-                CurrChanged = false;
-                for (Loop *L : LI) {
-                    if (!L->getLoopPreheader()) {
-                        errs() << "No loop preheader, skipping loop.\n";
-                        continue;
-                    }
+            for (Loop *L: LI) {
+                if (!L->getLoopPreheader()) {
+                    errs() << "No loop preheader, skipping loop.\n";
+                    continue;
+                }
 
-                    std::vector<Instruction *> instructionsToMove;
+                std::vector<Instruction *> instructionsToMove;
 
-                    for (BasicBlock *BB : L->blocks()) {
-                        for (Instruction &I : *BB) {
-                            if (isInvariantInstruction(&I, L, DT, instructionsToMove)) {
-                                CurrChanged = true;
-                                Changed = true;
-                            }
-                        }
-                    }
-
-                    for (Instruction *I : instructionsToMove) {
-                        errs() << "Instruction to move: " << *I << "\n";
-                        errs() << "Where to move it: " << *L->getLoopPreheader()->getTerminator() << "\n";
-                        I->moveBefore(L->getLoopPreheader()->getTerminator());
+                for (BasicBlock *BB: L->blocks()) {
+                    for (Instruction &I: *BB) {
+                        Changed |= isInvariantInstruction(&I, L, DT, instructionsToMove);
                     }
                 }
-            } while (CurrChanged);
+
+                for (Instruction *I: instructionsToMove) {
+                    errs() << "Instruction to move: " << *I << "\n";
+                    errs() << "Where to move it: " << *L->getLoopPreheader()->getTerminator() << "\n";
+                    I->moveBefore(L->getLoopPreheader()->getTerminator());
+                }
+            }
 
             change = performConstantFolding(F);
             if (change) {
@@ -77,36 +72,103 @@ namespace {
         void getAnalysisUsage(AnalysisUsage &AU) const override {
             AU.addRequired<LoopInfoWrapperPass>();
             AU.addRequired<DominatorTreeWrapperPass>();
+            AU.setPreservesAll();
         }
 
-        bool isInvariantInstruction(Instruction *I, Loop *L, DominatorTree &DT, std::vector<Instruction *> &instructionsToMove) {
+        bool isInvariantInstruction(Instruction *I, Loop *L, DominatorTree &DT, std::vector<Instruction *>& instructionsToMove) {
             if (isDesiredInstructionType(I) &&
                 areAllOperandsConstantsOrComputedOutsideLoop(I, L) &&
                 isSafeToSpeculativelyExecute(I) &&
                 doesBlockDominateAllExitBlocks(I->getParent(), L, &DT)) {
                 instructionsToMove.push_back(I);
-                return true;
             }
 
-            if (auto *SI = dyn_cast<StoreInst>(I)) {
-                if (!isReferencedInLoop(SI, SI->getPointerOperand(), L)) {
+            else if (auto *SI = dyn_cast<StoreInst>(I)) {
+                if (!isChangedInLoop(SI, SI->getPointerOperand(), L)) {
                     Value *StoredVal = SI->getValueOperand();
                     if (isa<Constant>(StoredVal)) {
                         instructionsToMove.push_back(I);
-                        return true;
                     }
                 }
             }
 
-            if (isIncrementOrDecrement(I)) {
-                auto *SI = cast<StoreInst>(I->getNextNode());
-                if (!isReferencedInLoop(SI, SI->getPointerOperand(), L) && L->getLoopLatch() != I->getParent() && L->getHeader() != I->getParent()) {
-                    errs() << "Increment!\n" << *I << "\n";
-                    return true;
+            else if (isIncrementOrDecrement(I) && I->getParent() != L->getHeader() && I->getParent() != L->getLoopLatch()) {
+                Value* Iterations = getLoopIterationCount(L);
+                if (Iterations != nullptr) {
+                    if (auto *SI = dyn_cast<StoreInst>(I->getNextNode())) {
+                        if (auto *LI = dyn_cast<LoadInst>(I->getPrevNode())) {
+                            if (!isReferencedInLoop(SI, LI, SI->getPointerOperand(), L)) {
+                                Value *loadedValue = LI->getPointerOperand();
+                                ConstantInt *ConstOperand = nullptr;
+                                if (isa<ConstantInt>(I->getOperand(0))) {
+                                    ConstOperand = cast<ConstantInt>(I->getOperand(0));
+                                } else {
+                                    ConstOperand = cast<ConstantInt>(I->getOperand(1));
+                                }
+
+                                IRBuilder<> builder(L->getLoopPreheader()->getTerminator());
+                                ConstantInt *IterationsConst = cast<ConstantInt>(Iterations);
+                                Value *Result = builder.CreateMul(ConstOperand, IterationsConst);
+                                I->setOperand(ConstOperand == I->getOperand(0) ? 0 : 1, Result);
+
+                                instructionsToMove.push_back(LI);
+                                instructionsToMove.push_back(I);
+                                instructionsToMove.push_back(SI);
+
+                                for (Instruction *I: instructionsToMove) {
+                                    errs() << *I << "\n";
+                                }
+
+                                return true;
+                            }
+                        }
+                    }
                 }
             }
 
             return false;
+        }
+
+        Value* getLoopIterationCount(Loop *L) {
+            BasicBlock* Header = L->getHeader();
+            Value *HeaderOp = nullptr;
+
+            for (Instruction &I : *Header) {
+                if (auto *CI = dyn_cast<CmpInst>(&I)) {
+                    if (CI->getOpcode() == Instruction::ICmp) {
+                        if(HeaderOp != nullptr){
+                            return nullptr;
+                        }
+                        HeaderOp = CI->getOperand(1);
+                        if(!isa<ConstantInt>(HeaderOp) && isChangedInLoop(&I, HeaderOp, L)){
+                            return nullptr;
+                        }
+                    }
+                }
+            }
+
+
+            BasicBlock* Latch = L->getLoopLatch();
+            Value *LatchOp = nullptr;
+
+            for (Instruction &I : *Latch) {
+                if (auto *AddInst = dyn_cast<BinaryOperator>(&I)) {
+                    if (AddInst->getOpcode() == Instruction::Add) {
+                        if(LatchOp != nullptr){
+                            return nullptr;
+                        }
+                        LatchOp = AddInst->getOperand(1);
+                        if (!isa<ConstantInt>(LatchOp)) {
+                            return nullptr;
+                        }
+                    }
+                }
+            }
+
+            IRBuilder<> builder(L->getLoopPreheader()->getTerminator());
+
+            return  builder.CreateSDiv(HeaderOp, LatchOp);
+
         }
 
         bool isDesiredInstructionType(Instruction *I) {
@@ -117,10 +179,10 @@ namespace {
         }
 
         bool areAllOperandsConstantsOrComputedOutsideLoop(Instruction *I, Loop *L) {
-            for (Use &U : I->operands()) {
+            for (Use &U: I->operands()) {
                 Value *V = U.get();
                 if (!isa<Constant>(V)) {
-                    if (Instruction *OpInst = dyn_cast<Instruction>(V)) {
+                    if (Instruction * OpInst = dyn_cast<Instruction>(V)) {
                         if (L->contains(OpInst->getParent())) {
                             return false;
                         }
@@ -133,9 +195,9 @@ namespace {
         }
 
         std::vector<BasicBlock *> getExitBlocks(Loop *L) {
-            std::vector<BasicBlock *> exitBlocks;
-            for (BasicBlock *BB : L->blocks()) {
-                for (BasicBlock *Succ : successors(BB)) {
+            std::vector < BasicBlock * > exitBlocks;
+            for (BasicBlock *BB: L->blocks()) {
+                for (BasicBlock *Succ: successors(BB)) {
                     if (!L->contains(Succ)) {
                         exitBlocks.push_back(Succ);
                     }
@@ -145,8 +207,8 @@ namespace {
         }
 
         bool doesBlockDominateAllExitBlocks(BasicBlock *BB, Loop *L, DominatorTree *DT) {
-            std::vector<BasicBlock *> exitBlocks = getExitBlocks(L);
-            for (BasicBlock *ExitBB : exitBlocks) {
+            std::vector < BasicBlock * > exitBlocks = getExitBlocks(L);
+            for (BasicBlock *ExitBB: exitBlocks) {
                 if (!DT->dominates(BB, ExitBB)) {
                     return false;
                 }
@@ -155,30 +217,39 @@ namespace {
         }
 
         bool isDefinedOutsideLoop(Value *V, Loop *L) {
-            if (Instruction *Inst = dyn_cast<Instruction>(V)) {
+            if (Instruction * Inst = dyn_cast<Instruction>(V)) {
                 return !L->contains(Inst->getParent());
             }
             return true;
         }
 
-        bool isReferencedInLoop(Instruction *StartInst, Value *Ptr, Loop *L) {
+        bool isReferencedInLoop(Instruction *StoreInst, Instruction *LoadInst, Value *Ptr, Loop *L) {
+            for (BasicBlock *BB: L->blocks()) {
+                for (Instruction &I: *BB) {
+                    if (&I != StoreInst && &I != LoadInst) {
+                        for (Use &U: I.operands()) {
+                            Value *V = U.get();
+                            if(V == Ptr){
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        bool isChangedInLoop(Instruction *StartInst, Value *Ptr, Loop *L) {
             for (BasicBlock *BB : L->blocks()) {
                 for (Instruction &I : *BB) {
-                    if (&I != StartInst) {
+                    if(&I != StartInst) {
                         if (auto *SI = dyn_cast<StoreInst>(&I)) {
                             if (SI->getPointerOperand() == Ptr) {
                                 return true;
                             }
                         }
-                        if (auto *CI = dyn_cast<CmpInst>(&I)) {
-                            for (Use &U : CI->operands()) {
-                                Value *V = U.get();
-                                if (V == Ptr) {
-                                    return true;
-                                }
-                            }
-                        }
                     }
+
                 }
             }
             return false;
@@ -206,6 +277,94 @@ namespace {
                 }
             }
             return false;
+        }
+
+        void handleBinaryOperator(Instruction &I, std::vector<Instruction *> &InstructionsToRemove) {
+            Value *Lhs = I.getOperand(0), *Rhs = I.getOperand(1);
+            if (ConstantInt * LhsValue = dyn_cast<ConstantInt>(Lhs)) {
+                if (ConstantInt * RhsValue = dyn_cast<ConstantInt>(Rhs)) {
+                    int64_t Value = 0;
+                    switch (I.getOpcode()) {
+                        case Instruction::Add:
+                            Value = LhsValue->getSExtValue() + RhsValue->getSExtValue();
+                            break;
+                        case Instruction::Sub:
+                            Value = LhsValue->getSExtValue() - RhsValue->getSExtValue();
+                            break;
+                        case Instruction::Mul:
+                            Value = LhsValue->getSExtValue() * RhsValue->getSExtValue();
+                            break;
+                        case Instruction::SDiv:
+                            if (RhsValue->getSExtValue() == 0) {
+                                errs() << "Division by zero is not allowed!\n";
+                                return;
+                            }
+                            Value = LhsValue->getSExtValue() / RhsValue->getSExtValue();
+                            break;
+                        default:
+                            return;
+                    }
+
+                    I.replaceAllUsesWith(ConstantInt::get(I.getType(), Value));
+                    InstructionsToRemove.push_back(&I);
+                }
+            }
+        }
+
+
+        void handleCompareInstruction(Instruction &I, std::vector<Instruction *> &InstructionsToRemove) {
+            Value *Lhs = I.getOperand(0), *Rhs = I.getOperand(1);
+            if (ConstantInt * LhsValue = dyn_cast<ConstantInt>(Lhs)) {
+                if (ConstantInt * RhsValue = dyn_cast<ConstantInt>(Rhs)) {
+                    bool Value = false;
+                    ICmpInst *Cmp = cast<ICmpInst>(&I);
+                    switch (Cmp->getPredicate()) {
+                        case ICmpInst::ICMP_EQ:
+                            Value = LhsValue->getSExtValue() == RhsValue->getSExtValue();
+                            break;
+                        case ICmpInst::ICMP_NE:
+                            Value = LhsValue->getSExtValue() != RhsValue->getSExtValue();
+                            break;
+                        case ICmpInst::ICMP_SGT:
+                            Value = LhsValue->getSExtValue() > RhsValue->getSExtValue();
+                            break;
+                        case ICmpInst::ICMP_SLT:
+                            Value = LhsValue->getSExtValue() < RhsValue->getSExtValue();
+                            break;
+                        case ICmpInst::ICMP_SGE:
+                            Value = LhsValue->getSExtValue() >= RhsValue->getSExtValue();
+                            break;
+                        case ICmpInst::ICMP_SLE:
+                            Value = LhsValue->getSExtValue() <= RhsValue->getSExtValue();
+                            break;
+                        default:
+                            return;
+                    }
+
+                    I.replaceAllUsesWith(ConstantInt::get(I.getType(), Value));
+                    InstructionsToRemove.push_back(&I);
+                }
+            }
+        }
+
+
+        void handleBranchInstruction(Instruction &I, std::vector<Instruction *> &InstructionsToRemove) {
+            BranchInst *BranchInstr = dyn_cast<BranchInst>(&I);
+            if (BranchInstr->isConditional()) {
+                if (ConstantInt * Condition = dyn_cast<ConstantInt>(BranchInstr->getCondition())) {
+                    if (Condition->isOne()) {
+                        // Always take the true branch
+                        BasicBlock *TrueBB = BranchInstr->getSuccessor(0);
+                        BranchInst::Create(TrueBB, BranchInstr->getParent());
+                    } else {
+                        // Always take the false branch
+                        BasicBlock *FalseBB = BranchInstr->getSuccessor(1);
+                        BranchInst::Create(FalseBB, BranchInstr->getParent());
+                    }
+
+                    InstructionsToRemove.push_back(&I);
+                }
+            }
         }
     };
 }
@@ -328,4 +487,5 @@ static RegisterPass<MyLICMPass> X("my-licm", "My Loop Invariant Code Motion Pass
 //         }
 //     }
 // }
+
 
